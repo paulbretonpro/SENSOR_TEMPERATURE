@@ -1,4 +1,6 @@
 #include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include "DHT.h"
@@ -16,13 +18,28 @@ const char *password = "RobotVaHeThongThongMinh";
 // Set web server port number to 80
 ESP8266WebServer server(80);
 
+// Set Hours server
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
+
 // Job send data
 unsigned long lastApiRequestTime = 0;
 const unsigned long apiRequestInterval = 3600000;
 
+// Array store failed send value
+struct SensorData {
+  float temperature;
+  float humidity;
+  String datetime;
+};
+SensorData backup[168]; // size equal one week
+int numElement = 0;
+
 void handleSync();
 void handleGet();
 void handleSend();
+String getDatetime();
+void addSensorToBackup();
 
 void setup()
 {
@@ -54,6 +71,7 @@ void setup()
 
   server.begin(); // Actually start the server
   Serial.println("HTTP server started");
+  timeClient.begin();
 }
 
 void loop()
@@ -61,8 +79,9 @@ void loop()
   server.handleClient();
 
   unsigned long currentTime = millis();
-  
-  if (lastApiRequestTime == 0 or currentTime - lastApiRequestTime >= apiRequestInterval) {
+
+  if (lastApiRequestTime == 0 or currentTime - lastApiRequestTime >= apiRequestInterval)
+  {
     handleSend();
     lastApiRequestTime = currentTime;
   }
@@ -73,19 +92,39 @@ void handleGet()
   float h = dht.readHumidity();
   float t = dht.readTemperature();
 
-  DynamicJsonDocument jsonDocument(200);  // Use DynamicJsonDocument instead of StaticJsonDocument
+  DynamicJsonDocument jsonDocument(200); // Use DynamicJsonDocument instead of StaticJsonDocument
   jsonDocument["temperature"] = t;
   jsonDocument["humidity"] = h;
+  jsonDocument["datetime"] = getDatetime();
 
   String jsonResponse;
   serializeJson(jsonDocument, jsonResponse);
-  
+
   server.send(200, "application/json", jsonResponse);
 }
 
 void handleSync()
 {
-  server.send(200, "text/plain", "Hello world!"); // Send HTTP status 200 (Ok) and send some text to the browser/client
+  // Create a JSON document
+  DynamicJsonDocument doc(1024);
+
+  // Create an array in the JSON document
+  JsonArray jsonArray = doc.createNestedArray("data");
+
+  // Fill the array with sensor data
+  for (int i = 0; i < numElement; i++) {
+    JsonObject obj = jsonArray.createNestedObject();
+    obj["temperature"] = backup[i].temperature;
+    obj["humidity"] = backup[i].humidity;
+    obj["datetime"] = backup[i].datetime;
+  }
+
+  // Serialize the JSON document to a string
+  String response;
+  serializeJson(doc, response);
+
+  server.send(200, "application/json", response);
+  numElement = 0;
 }
 
 void handleSend()
@@ -113,7 +152,62 @@ void handleSend()
     Serial.print("HTTP Error Code: ");
     Serial.println(httpResponseCode);
   }
+  addSensorToBackup(t, h);
 
   http.end();
+}
+
+String getDatetime()
+{
+  String currentHourFormated = "";
+  String currentMonthFormated = "";
+  String currentDayFormated= "";
   
+  timeClient.update();
+  
+  time_t epochTime = timeClient.getEpochTime();
+  int currentHour = timeClient.getHours();
+  if (currentHour < 10)
+  {
+    currentHourFormated = "0" + String(currentHour);
+  }
+  else
+  {
+    currentHourFormated = String(currentHour);
+  }
+  // Get a time structure
+  struct tm *ptm = gmtime((time_t *)&epochTime);
+  int monthDay = ptm->tm_mday;
+  if (monthDay < 10)
+  {
+    currentDayFormated = "0" + String(monthDay);
+  }
+  else
+  {
+    currentDayFormated = String(monthDay);
+  }
+  int currentMonth = ptm->tm_mon + 1;
+  if (currentMonth < 10)
+  {
+    currentMonthFormated = "0" + String(currentMonth);
+  }
+  else
+  {
+    currentMonthFormated = String(currentMonth);
+  }
+  int currentYear = ptm->tm_year + 1900;
+  String currentDate = String(currentYear) + "-" + currentMonthFormated + "-" + currentDayFormated + "T" + currentHourFormated + ":00:00Z";
+
+  return currentDate;
+}
+
+void addSensorToBackup(float temperature, float humidity) {
+  if (numElement < 168) {
+    backup[numElement].temperature = temperature;
+    backup[numElement].humidity = humidity;
+    backup[numElement].datetime = getDatetime();
+    numElement++;
+  } else {
+    Serial.println("Backup is full, cannot add more data points.");
+  }
 }
